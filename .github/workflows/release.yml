@@ -7,6 +7,9 @@ on:
 
 permissions:
   contents: write
+  # Required by actions/attest to mint the provenance signature.
+  id-token: write
+  attestations: write
 
 jobs:
   release:
@@ -22,6 +25,17 @@ jobs:
             echo "Tag $GITHUB_REF_NAME does not match manifest.json version $MANIFEST_VERSION"
             exit 1
           fi
+
+      # Signs the artifacts so users can cryptographically verify they were
+      # built from this repository. Must run before the release is created:
+      # the attestation is bound to this workflow run, not to the release.
+      - name: Generate artifact attestation
+        uses: actions/attest@v4
+        with:
+          subject-path: |
+            main.js
+            manifest.json
+            styles.css
 
       - name: Create draft release
         env:
