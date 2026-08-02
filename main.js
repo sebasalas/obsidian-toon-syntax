@@ -2,7 +2,7 @@ const { Plugin, PluginSettingTab, Setting } = require("obsidian");
 
 const KEYWORDS = new Set(["null", "true", "false"]);
 const NUMBER_RE = /^-?\d+(\.\d+)?([eE][+-]?\d+)?$/;
-const HEADER_RE = /^([A-Za-z_][\w.]*)?\[(\d+)([|,\t])?\](\{[^}]*\})?:\s*$/;
+const HEADER_RE = /^([A-Za-z_][\w.]*)?\[(\d+)([|,\t])?\](\{[^}]*\})?:(\s*)$/;
 
 const DEFAULT_SETTINGS = {
   wrapLines: false,
@@ -17,43 +17,53 @@ function addSpan(parent, cls, text) {
   parent.createSpan({ cls: "toon-" + cls, text });
 }
 
-// Splits a data row on the delimiter while respecting double quotes,
-// handling both \" escapes and "" doubling.
-function splitRespectingQuotes(line, delimiter) {
-  const tokens = [];
-  let current = "";
+// Single source of truth for how quotes behave in a TOON line: a double quote
+// opens a string, "" and \" are escapes that stay inside it, and the next lone
+// quote closes it. Returns a per-character mask of "this index is inside a
+// quoted string".
+//
+// Everything that needs to reason about quotes consumes this mask, so the
+// delimiter splitter and the top-level search cannot disagree about where a
+// string begins and ends.
+function scanQuotes(line) {
+  const inString = new Array(line.length).fill(false);
   let inQuotes = false;
 
   for (let i = 0; i < line.length; i++) {
     const c = line[i];
 
     if (inQuotes) {
+      inString[i] = true;
       if (c === '"') {
-        if (line[i + 1] === '"') {
-          current += '"';
-          i++;
-        } else {
-          inQuotes = false;
-          current += c;
-        }
+        if (line[i + 1] === '"') inString[++i] = true;
+        else inQuotes = false;
       } else if (c === "\\" && line[i + 1] === '"') {
-        current += '\\"';
-        i++;
-      } else {
-        current += c;
+        inString[++i] = true;
       }
     } else if (c === '"') {
       inQuotes = true;
-      current += c;
-    } else if (c === delimiter) {
-      tokens.push(current);
-      current = "";
-    } else {
-      current += c;
+      inString[i] = true;
     }
   }
 
-  tokens.push(current);
+  return inString;
+}
+
+// Splits a data row on the delimiter, ignoring delimiters inside quotes.
+// Slices the original line so the token text is preserved byte for byte.
+function splitRespectingQuotes(line, delimiter) {
+  const inString = scanQuotes(line);
+  const tokens = [];
+  let start = 0;
+
+  for (let i = 0; i < line.length; i++) {
+    if (line[i] === delimiter && !inString[i]) {
+      tokens.push(line.slice(start, i));
+      start = i + 1;
+    }
+  }
+
+  tokens.push(line.slice(start));
   return tokens;
 }
 
@@ -64,9 +74,22 @@ function tokenClass(value) {
   return "plain";
 }
 
+// Emits a token, keeping any surrounding whitespace as plain text nodes.
+// The rendered block must read back byte for byte identical to the source:
+// a highlighter that reflows or trims content is altering the document.
 function addToken(parent, token) {
-  const value = token.trim();
-  addSpan(parent, value === "" ? "plain" : tokenClass(value), value);
+  if (token.trim() === "") {
+    if (token !== "") parent.appendText(token);
+    return;
+  }
+
+  const lead = token.match(/^\s*/)[0];
+  const trail = token.match(/\s*$/)[0];
+  const value = token.slice(lead.length, token.length - trail.length);
+
+  if (lead !== "") parent.appendText(lead);
+  addSpan(parent, tokenClass(value), value);
+  if (trail !== "") parent.appendText(trail);
 }
 
 function addDataRow(parent, line, delimiter) {
@@ -77,14 +100,12 @@ function addDataRow(parent, line, delimiter) {
   });
 }
 
-// Index of the first occurrence of target outside double quotes, or -1.
+// Index of the first occurrence of target outside a quoted string, or -1.
 function findTopLevelChar(line, target) {
-  let inQuotes = false;
+  const inString = scanQuotes(line);
 
   for (let i = 0; i < line.length; i++) {
-    const c = line[i];
-    if (c === '"') inQuotes = !inQuotes;
-    else if (c === target && !inQuotes) return i;
+    if (line[i] === target && !inString[i]) return i;
   }
 
   return -1;
@@ -104,7 +125,7 @@ function renderLine(parent, rawLine) {
 
   const header = rest.match(HEADER_RE);
   if (header) {
-    const [, name, count, delimiter, fields] = header;
+    const [, name, count, delimiter, fields, trailing] = header;
 
     if (name) addSpan(parent, "key", name);
     addSpan(parent, "punct", "[");
@@ -125,6 +146,7 @@ function renderLine(parent, rawLine) {
     }
 
     addSpan(parent, "punct", ":");
+    if (trailing) parent.appendText(trailing);
     return;
   }
 
@@ -140,12 +162,13 @@ function renderLine(parent, rawLine) {
     addSpan(parent, "key", rest.slice(0, colonIdx));
     addSpan(parent, "punct", ":");
 
-    const value = rest.slice(colonIdx + 1).trim();
-    if (value !== "") {
-      parent.appendText(" ");
-      if (findTopLevelChar(value, ",") !== -1) addDataRow(parent, value, ",");
-      else addToken(parent, value);
-    }
+    // Hand the remainder over untouched; addToken keeps its own spacing, so
+    // "total:42" never gains a space and "total:   42" never loses two.
+    const after = rest.slice(colonIdx + 1);
+    if (after === "") return;
+
+    if (findTopLevelChar(after, ",") !== -1) addDataRow(parent, after, ",");
+    else addToken(parent, after);
     return;
   }
 
@@ -181,6 +204,21 @@ class ToonSyntaxSettingTab extends PluginSettingTab {
 
 module.exports = class ToonSyntaxPlugin extends Plugin {
   async onload() {
+    // Popout windows render into their own document, so the wrap class has to
+    // be mirrored into each one rather than set on the main body alone.
+    this.documents = new Set([document]);
+    this.registerEvent(
+      this.app.workspace.on("window-open", (workspaceWindow, win) => {
+        this.documents.add(win.document);
+        this.applyWrapClass();
+      })
+    );
+    this.registerEvent(
+      this.app.workspace.on("window-close", (workspaceWindow, win) => {
+        this.documents.delete(win.document);
+      })
+    );
+
     await this.loadSettings();
     this.applyWrapClass();
     this.addSettingTab(new ToonSyntaxSettingTab(this.app, this));
@@ -203,7 +241,9 @@ module.exports = class ToonSyntaxPlugin extends Plugin {
   }
 
   onunload() {
-    document.body.classList.remove(WRAP_CLASS);
+    for (const doc of this.documents ?? [document]) {
+      doc.body.classList.remove(WRAP_CLASS);
+    }
   }
 
   async loadSettings() {
@@ -216,6 +256,8 @@ module.exports = class ToonSyntaxPlugin extends Plugin {
   }
 
   applyWrapClass() {
-    document.body.classList.toggle(WRAP_CLASS, this.settings.wrapLines);
+    for (const doc of this.documents) {
+      doc.body.classList.toggle(WRAP_CLASS, this.settings.wrapLines);
+    }
   }
 };
