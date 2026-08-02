@@ -1,0 +1,60 @@
+/*
+ * Obsidian injects a plugin's styles.css into <head> BEFORE the theme's style
+ * element (document.head.insertBefore(el, app.customCss.styleEl)). At equal
+ * specificity the theme wins, so the token selectors below are deliberately
+ * qualified with their pre/code ancestors.
+ */
+
+pre.toon-block {
+  overflow-x: auto;
+}
+
+pre.toon-block > code.toon-code {
+  white-space: pre;
+  font-family: var(--font-monospace);
+  color: var(--code-normal);
+}
+
+/*
+ * Wrap mode. The class lives on <body> so toggling the setting restyles
+ * already-rendered blocks with no re-render.
+ *
+ * overflow-wrap is required, not decorative: TOON data rows are comma-separated
+ * with no spaces (UUIDs, ISO timestamps), so pre-wrap alone finds no break
+ * opportunity and the line still overflows.
+ */
+body.toon-wrap-lines pre.toon-block > code.toon-code {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+pre.toon-block > code.toon-code span.toon-key {
+  color: var(--code-property);
+}
+
+pre.toon-block > code.toon-code span.toon-string {
+  color: var(--code-string);
+}
+
+pre.toon-block > code.toon-code span.toon-num {
+  color: var(--code-value);
+}
+
+pre.toon-block > code.toon-code span.toon-keyword {
+  color: var(--code-keyword);
+  font-weight: 600;
+}
+
+pre.toon-block > code.toon-code span.toon-punct {
+  color: var(--code-punctuation);
+  opacity: 0.85;
+}
+
+pre.toon-block > code.toon-code span.toon-plain {
+  color: var(--code-normal);
+}
+
+pre.toon-block > code.toon-code span.toon-comment {
+  color: var(--code-comment);
+  font-style: italic;
+}
